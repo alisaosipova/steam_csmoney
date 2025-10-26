@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from aiohttp import ClientSession
 
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 def _csmoney_unix_to_datetime(unix: int | None) -> datetime | None:
     if unix:
-        return datetime.fromtimestamp(unix / 1000, UTC)
+        return datetime.fromtimestamp(unix / 1000, timezone.utc)
     return None
 
 
