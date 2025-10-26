@@ -52,8 +52,7 @@ class CsmoneyItemPack(JsonMixin):
 @add_schema
 @dataclass
 class CsmoneyTask(JsonMixin):
-    # note that an offset parameter should be removed from a URL
-    # e.g.: https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true
+    # e.g.: https://cs.money/csgo/trade?minPrice=10&maxPrice=20
     url: str
 
 
