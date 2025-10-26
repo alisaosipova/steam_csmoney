@@ -17,9 +17,10 @@ def catch_aiohttp(logger):
                 aiohttp.ClientConnectionError,
                 aiohttp.ClientPayloadError,
                 aiohttp.ClientResponseError,
+                aiohttp.ContentTypeError,
                 ConnectionResetError,
             ) as exc:
-                logger.exception("Failed to connect to proxy", exc_info=exc)
+                logger.exception("Failed to perform HTTP request", exc_info=exc)
 
         return wrapper
 

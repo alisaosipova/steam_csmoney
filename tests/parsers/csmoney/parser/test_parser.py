@@ -24,6 +24,7 @@ from price_monitoring.parsers.csmoney.parser.parser import (
     CsmoneyParserImpl,
     _create_items,
     _csmoney_unix_to_datetime,
+    _is_cloudflare_challenge,
 )
 
 
@@ -170,6 +171,12 @@ def test_create_items_with_stack_and_tradelock():
         assert _create_items(data) == items
 
 
+def test_is_cloudflare_challenge():
+    assert _is_cloudflare_challenge("<title>Just a moment...</title>")
+    assert _is_cloudflare_challenge("CF-Mitigated"), "check is case insensitive"
+    assert not _is_cloudflare_challenge("<html><body>ok</body></html>")
+
+
 @pytest.mark.asyncio
 async def test_parse__puts_items(
     parser_fixture,
@@ -235,6 +242,31 @@ async def test_parse__raises_when_max_attempts_reached(
             )
 
     assert result_queue_fixture.put.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_parse__retries_when_cloudflare_blocks_request(
+    parser_fixture, result_queue_fixture, response_fixture
+):
+    challenge_html = "<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>"
+    valid_html = _build_html([response_fixture])
+
+    with aioresponses() as mocked:
+        mocked.get(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            body=challenge_html,
+        )
+        mocked.get(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            body=valid_html,
+        )
+
+        await parser_fixture.parse(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            result_queue_fixture,
+        )
+
+    assert result_queue_fixture.put.call_count == 1
 
 
 if __name__ == "__main__":

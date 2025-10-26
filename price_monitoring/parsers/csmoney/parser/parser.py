@@ -36,6 +36,13 @@ _REQUEST_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
+_CLOUDFLARE_KEYWORDS = (
+    "just a moment",
+    "cf-mitigated",
+    "cf-browser-verification",
+    "cf-chl",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,6 +72,11 @@ def _extract_skins(data: dict) -> list[dict]:
     if not isinstance(skins, list):
         return []
     return skins
+
+
+def _is_cloudflare_challenge(html: str) -> bool:
+    lowered = html.lower()
+    return any(keyword in lowered for keyword in _CLOUDFLARE_KEYWORDS)
 
 
 def _create_items(json_item) -> list[CsmoneyItem]:
@@ -107,7 +119,11 @@ def _create_items(json_item) -> list[CsmoneyItem]:
 async def _request(session: ClientSession, url: str) -> str | None:
     async with session.get(url, timeout=_RESPONSE_TIMEOUT, headers=_REQUEST_HEADERS) as response:
         response.raise_for_status()
-        return await response.text()
+        text = await response.text()
+        if _is_cloudflare_challenge(text):
+            logger.warning("Cloudflare challenge detected for %s", url)
+            return None
+        return text
 
 
 async def _process_items(items_data: list[dict], result_queue: AbstractCsmoneyWriter) -> None:
