@@ -52,8 +52,11 @@ def _csmoney_unix_to_datetime(unix: int | None) -> datetime | None:
     return None
 
 
-def _extract_next_data(html: str) -> dict:
-    match = _NEXT_DATA_PATTERN.search(html)
+def _extract_next_data(payload: str | dict) -> dict:
+    if isinstance(payload, dict):
+        return payload
+
+    match = _NEXT_DATA_PATTERN.search(payload)
     if not match:
         raise ValueError("__NEXT_DATA__ script not found in cs.money response")
     return json.loads(match.group("data"))
@@ -116,9 +119,13 @@ def _create_items(json_item) -> list[CsmoneyItem]:
 
 
 @catch_aiohttp(logger)
-async def _request(session: ClientSession, url: str) -> str | None:
+async def _request(session: ClientSession, url: str) -> str | dict | None:
     async with session.get(url, timeout=_RESPONSE_TIMEOUT, headers=_REQUEST_HEADERS) as response:
         response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "")
+        if "json" in content_type:
+            return await response.json()
+
         text = await response.text()
         if _is_cloudflare_challenge(text):
             logger.warning("Cloudflare challenge detected for %s", url)
@@ -145,8 +152,8 @@ class CsmoneyParserImpl(AbstractCsmoneyParser):
         failed_attempts = 0
         while failed_attempts <= max_attempts:
             session = await self._limiter.get_available(_POSTPONE_DURATION)
-            html = await _request(session, url)
-            if not html:
+            payload = await _request(session, url)
+            if not payload:
                 logger.info(
                     "Failed to load cs.money page",
                     extra={"attempt": failed_attempts, "url": url},
@@ -157,7 +164,7 @@ class CsmoneyParserImpl(AbstractCsmoneyParser):
             logger.info("Successfully got a response for %s", url)
 
             try:
-                next_data = _extract_next_data(html)
+                next_data = _extract_next_data(payload)
                 skins_data = _extract_skins(next_data)
             except ValueError as exc:
                 logger.exception("Failed to parse cs.money page", exc_info=exc)
