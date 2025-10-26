@@ -1,5 +1,7 @@
+import json
 import logging
-from datetime import datetime
+import re
+from datetime import UTC, datetime
 
 from aiohttp import ClientSession
 
@@ -10,28 +12,59 @@ from ._name_patcher import patch_market_name
 from ....models.csmoney import CsmoneyItem, CsmoneyItemPack, CsmoneyItemCategory
 from ....queues import AbstractCsmoneyWriter
 
-# currently, it cannot be greater than 60
-# because cs.money server side don't allow greater value
-_MAX_ALLOWED_OFFSET = 5000
-_CSMONEY_STEP = 60
 _RESPONSE_TIMEOUT = 10
 _POSTPONE_DURATION = 25
+_MAX_ATTEMPTS_DEFAULT = 300
+_NEXT_DATA_PATTERN = re.compile(
+    r'<script id="__NEXT_DATA__" type="application/json"[^>]*>(?P<data>.*?)</script>',
+    re.DOTALL,
+)
+_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Referer": "https://cs.money/csgo/trade",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 logger = logging.getLogger(__name__)
 
 
 def _csmoney_unix_to_datetime(unix: int | None) -> datetime | None:
     if unix:
-        return datetime.utcfromtimestamp(unix / 1000)
+        return datetime.fromtimestamp(unix / 1000, UTC)
     return None
 
 
-def _append_offset(url: str, offset: int) -> str:
-    return f"{url}&offset={offset}"
+def _extract_next_data(html: str) -> dict:
+    match = _NEXT_DATA_PATTERN.search(html)
+    if not match:
+        raise ValueError("__NEXT_DATA__ script not found in cs.money response")
+    return json.loads(match.group("data"))
 
 
-def _is_response_mean_end(data: dict) -> bool:
-    return data == {"error": 2}  # it marks end of items
+def _extract_skins(data: dict) -> list[dict]:
+    try:
+        props = data["props"]
+        page_props = props["pageProps"]
+        bot_init = page_props["botInitData"]
+        skins_info = bot_init["skinsInfo"]
+    except KeyError as exc:  # pragma: no cover - defensive branch
+        raise ValueError("Unexpected structure of cs.money page") from exc
+
+    skins = skins_info.get("skins")
+    if not isinstance(skins, list):
+        return []
+    return skins
 
 
 def _create_items(json_item) -> list[CsmoneyItem]:
@@ -71,16 +104,15 @@ def _create_items(json_item) -> list[CsmoneyItem]:
 
 
 @catch_aiohttp(logger)
-async def _request(session: ClientSession, step_url: str) -> dict | None:
-    async with session.get(step_url, timeout=_RESPONSE_TIMEOUT) as response:
+async def _request(session: ClientSession, url: str) -> str | None:
+    async with session.get(url, timeout=_RESPONSE_TIMEOUT, headers=_REQUEST_HEADERS) as response:
         response.raise_for_status()
-        return await response.json()
+        return await response.text()
 
 
-async def _process_json_data(data, result_queue: AbstractCsmoneyWriter) -> None:
-    assert "items" in data
+async def _process_items(items_data: list[dict], result_queue: AbstractCsmoneyWriter) -> None:
     pack = CsmoneyItemPack()
-    for json_item in data["items"]:
+    for json_item in items_data:
         items = _create_items(json_item)
         for item in items:
             pack.items.append(item)
@@ -92,36 +124,32 @@ class CsmoneyParserImpl(AbstractCsmoneyParser):
         self._limiter = limiter
 
     async def parse(
-        self, url: str, result_queue: AbstractCsmoneyWriter, max_attempts: int = 300
+        self, url: str, result_queue: AbstractCsmoneyWriter, max_attempts: int = _MAX_ATTEMPTS_DEFAULT
     ) -> None:
         failed_attempts = 0
-        offset = 0
-
         while failed_attempts <= max_attempts:
-            if offset > _MAX_ALLOWED_OFFSET:
-                logger.warning(f"Reached max allowed offset ({_MAX_ALLOWED_OFFSET})!")
-                break
-            step_url = _append_offset(url, offset)
             session = await self._limiter.get_available(_POSTPONE_DURATION)
-            response = await _request(session, step_url)
-            if not response:
+            html = await _request(session, url)
+            if not html:
                 logger.info(
-                    f"Failed on {failed_attempts} attempt to load {step_url=}",
-                    extra={"attempt": failed_attempts, "url": step_url},
+                    "Failed to load cs.money page",
+                    extra={"attempt": failed_attempts, "url": url},
                 )
                 failed_attempts += 1
                 continue
-            offset += _CSMONEY_STEP
 
-            logger.info(
-                f"Successfully got a response for {step_url=}",
-                extra={"response": response, "url": step_url},
-            )
+            logger.info("Successfully got a response for %s", url)
 
-            if _is_response_mean_end(response):  # it marks end of items
-                logger.info(f"Found end of items for {step_url=}")
-                break
-            await _process_json_data(response, result_queue)
+            try:
+                next_data = _extract_next_data(html)
+                skins_data = _extract_skins(next_data)
+            except ValueError as exc:
+                logger.exception("Failed to parse cs.money page", exc_info=exc)
+                failed_attempts += 1
+                continue
+
+            await _process_items(skins_data, result_queue)
+            break
 
         if failed_attempts > max_attempts:
             raise MaxAttemptsReachedError()

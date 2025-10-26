@@ -1,29 +1,48 @@
 import datetime
 import json
+import sys
+import types
 from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
+import pytest_asyncio
 from aiohttp import ClientSession
 from aioresponses import aioresponses
 
-from price_monitoring.models.csmoney import CsmoneyItem, CsmoneyItemPack, CsmoneyItemCategory
+dummy_aioredis = types.ModuleType("aioredis")
+dummy_aioredis.Redis = object
+sys.modules.setdefault("aioredis", dummy_aioredis)
+
+from price_monitoring.models.csmoney import (
+    CsmoneyItem,
+    CsmoneyItemCategory,
+    CsmoneyItemPack,
+)
 from price_monitoring.parsers.csmoney.parser.abstract_parser import MaxAttemptsReachedError
 from price_monitoring.parsers.csmoney.parser.parser import (
     CsmoneyParserImpl,
-    _is_response_mean_end,
-    _append_offset,
-    _csmoney_unix_to_datetime,
     _create_items,
+    _csmoney_unix_to_datetime,
 )
 
 
-@pytest.fixture()
+def _build_html(items: list[dict]) -> str:
+    data = {"props": {"pageProps": {"botInitData": {"skinsInfo": {"skins": items}}}}}
+    return (
+        "<!DOCTYPE html><html><head></head><body>"
+        "<script id=\"__NEXT_DATA__\" type=\"application/json\">"
+        f"{json.dumps(data)}"
+        "</script></body></html>"
+    )
+
+
+@pytest_asyncio.fixture()
 async def limiter_fixture():
     session = ClientSession()
-    m = AsyncMock()
-    m.get_available.return_value = session
-    yield m
+    limiter = AsyncMock()
+    limiter.get_available.return_value = session
+    yield limiter
     await session.close()
 
 
@@ -52,104 +71,19 @@ def csmoney_item_fixture():
         name_id=3985,
         type_=CsmoneyItemCategory.KNIFE,
         float_="0.008115612901747",
-        unlock_timestamp=datetime.datetime.fromisoformat("2022-02-21T08:00:00"),
+        unlock_timestamp=datetime.datetime.fromtimestamp(1645430400, datetime.UTC),
         overpay_float=140.69,
     )
 
 
 @pytest.fixture()
 def csmoney_item_pack_fixture(csmoney_item_fixture):
-    return CsmoneyItemPack(items=[csmoney_item_fixture] * 60)
-
-
-@pytest.fixture()
-def csmoney_responses_fixture(response_fixture):
-    items = {"items": [response_fixture for _ in range(60)]}
-    empty = {"error": 2}
-    with aioresponses() as m:
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=0",
-            payload=items,
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=60",
-            payload=items,
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=120",
-            payload=items,
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=180",
-            payload=empty,
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=240",
-            payload=empty,
-        )
-        yield m
-
-
-@pytest.fixture()
-def csmoney_responses_with_errors_fixture(response_fixture):
-    items = {"items": [response_fixture for _ in range(60)]}
-    empty = {"error": 2}
-
-    with aioresponses() as m:
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=0",
-            payload=items,
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=60",
-            exception=aiohttp.ClientProxyConnectionError(None, OSError()),
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=60",
-            payload=items,
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=120",
-            exception=aiohttp.ClientConnectionError(),
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=120",
-            exception=ConnectionResetError(),
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=120",
-            payload=items,
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=180",
-            payload=empty,
-        )
-        m.get(
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=240",
-            payload=empty,
-        )
-        yield m
-
-
-@pytest.mark.parametrize(
-    "data,end",
-    [
-        ({"error": 2}, True),
-        ({"items": []}, False),
-    ],
-)
-def test_is_response_mean_end(data: dict, end: bool):
-    assert _is_response_mean_end(data) == end
-
-
-def test_append_offset():
-    url = _append_offset("https://cs.money/api?count=60", 21)
-    assert url == "https://cs.money/api?count=60&offset=21"
+    return CsmoneyItemPack(items=[csmoney_item_fixture, csmoney_item_fixture])
 
 
 def test_csmoney_unix_to_datetime():
-    assert _csmoney_unix_to_datetime(1645009200000) == datetime.datetime.fromisoformat(
-        "2022-02-16T11:00:00"
+    assert _csmoney_unix_to_datetime(1645009200000) == datetime.datetime.fromtimestamp(
+        1645009200, datetime.UTC
     )
 
 
@@ -164,7 +98,7 @@ def test_create_items_without_stack():
                 name_id=3985,
                 type_=CsmoneyItemCategory.KNIFE,
                 float_="0.008115612901747",
-                unlock_timestamp=datetime.datetime.fromisoformat("2022-02-21T08:00:00"),
+                unlock_timestamp=datetime.datetime.fromtimestamp(1645430400, datetime.UTC),
                 overpay_float=140.69,
             )
         ]
@@ -219,7 +153,7 @@ def test_create_items_with_stack_and_tradelock():
                 name_id=15840,
                 type_=CsmoneyItemCategory.KNIFE,
                 float_="0.056123819202184",
-                unlock_timestamp=datetime.datetime.fromisoformat("2022-02-21T08:00:00"),
+                unlock_timestamp=datetime.datetime.fromtimestamp(1645430400, datetime.UTC),
                 overpay_float=None,
             ),
             CsmoneyItem(
@@ -229,135 +163,78 @@ def test_create_items_with_stack_and_tradelock():
                 name_id=15840,
                 type_=CsmoneyItemCategory.KNIFE,
                 float_="0.06806051731109601",
-                unlock_timestamp=datetime.datetime.fromisoformat("2022-02-21T08:00:00"),
+                unlock_timestamp=datetime.datetime.fromtimestamp(1645430400, datetime.UTC),
                 overpay_float=None,
             ),
         ]
         assert _create_items(data) == items
 
 
-async def test_parse__assert_items(
+@pytest.mark.asyncio
+async def test_parse__puts_items(
     parser_fixture,
     result_queue_fixture,
-    csmoney_responses_fixture,
+    response_fixture,
     csmoney_item_pack_fixture,
 ):
-    await parser_fixture.parse(
-        "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true",
-        result_queue_fixture,
-    )
+    html = _build_html([response_fixture, response_fixture])
 
-    assert result_queue_fixture.put.call_count == 3
-    for call in result_queue_fixture.put.call_args_list:
-        assert call.args == (csmoney_item_pack_fixture,)
+    with aioresponses() as mocked:
+        mocked.get(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            body=html,
+        )
+
+        await parser_fixture.parse(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            result_queue_fixture,
+        )
+
+    result_queue_fixture.put.assert_called_once_with(csmoney_item_pack_fixture)
 
 
-async def test_parse__assert_requests(
-    parser_fixture, result_queue_fixture, csmoney_responses_fixture
+@pytest.mark.asyncio
+async def test_parse__retries_on_errors(
+    parser_fixture, result_queue_fixture, response_fixture
 ):
-    await parser_fixture.parse(
-        "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true",
-        result_queue_fixture,
-    )
+    html = _build_html([response_fixture])
 
-    assert len(csmoney_responses_fixture.requests) == 4
-    urls = {str(url): len(calls) for (_, url), calls in csmoney_responses_fixture.requests.items()}
+    with aioresponses() as mocked:
+        mocked.get(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            exception=aiohttp.ClientConnectionError(),
+        )
+        mocked.get(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            body=html,
+        )
 
-    # asserting number of calls for each URL
-    assert (
-        urls[
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=0&withStack=true"
-        ]
-        == 1
-    )
-    assert (
-        urls[
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=60&withStack=true"
-        ]
-        == 1
-    )
-    assert (
-        urls[
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=120&withStack=true"
-        ]
-        == 1
-    )
-    assert (
-        urls[
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=180&withStack=true"
-        ]
-        == 1
-    )
+        await parser_fixture.parse(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            result_queue_fixture,
+        )
+
+    assert result_queue_fixture.put.call_count == 1
 
 
-async def test_parse_with_errors__assert_requests(
-    parser_fixture, result_queue_fixture, csmoney_responses_with_errors_fixture
+@pytest.mark.asyncio
+async def test_parse__raises_when_max_attempts_reached(
+    parser_fixture, result_queue_fixture
 ):
-    await parser_fixture.parse(
-        "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true",
-        result_queue_fixture,
-    )
-
-    assert len(csmoney_responses_with_errors_fixture.requests) == 4
-    urls = {
-        str(url): len(calls)
-        for (_, url), calls in csmoney_responses_with_errors_fixture.requests.items()
-    }
-
-    # asserting number of calls for each URL
-    assert (
-        urls[
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=0&withStack=true"
-        ]
-        == 1
-    )
-    assert (
-        urls[
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=60&withStack=true"
-        ]
-        == 2
-    )
-    assert (
-        urls[
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=120&withStack=true"
-        ]
-        == 3
-    )
-    assert (
-        urls[
-            "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=180&withStack=true"
-        ]
-        == 1
-    )
-
-
-@pytest.mark.parametrize("max_attempts", range(25))
-async def test_parse_with_errors__check_max_attempts(
-    parser_fixture, result_queue_fixture, max_attempts
-):
-    with aioresponses() as m:
-        for _ in range(max_attempts + 10):
-            m.get(
-                "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true&offset=60",
-                exception=aiohttp.ClientConnectionError(),
-            )
+    with aioresponses() as mocked:
+        mocked.get(
+            "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
+            exception=aiohttp.ClientConnectionError(),
+        )
 
         with pytest.raises(MaxAttemptsReachedError):
             await parser_fixture.parse(
-                "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&withStack=true",
+                "https://cs.money/csgo/trade?minPrice=0.2&maxPrice=0.3",
                 result_queue_fixture,
-                max_attempts=max_attempts,
+                max_attempts=0,
             )
 
-        assert len(m.requests) == 1
-        urls = {str(url): len(calls) for (_, url), calls in m.requests.items()}
-        # asserting number of calls for each URL
-        assert (
-            urls[
-                "https://inventories.cs.money/5.0/load_bots_inventory/730?limit=60&offset=0&withStack=true"
-            ]
-            == max_attempts + 1
-        )
+    assert result_queue_fixture.put.call_count == 0
 
 
 if __name__ == "__main__":

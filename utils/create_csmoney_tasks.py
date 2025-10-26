@@ -8,9 +8,8 @@ from price_monitoring.parsers.csmoney.task_scheduler import RedisTaskScheduler
 
 def generate_tasks() -> list[CsmoneyTask]:
     fmt = (
-        "https://inventories.cs.money/5.0/load_bots_inventory/730?hasTradeLock=false"
-        "&hasTradeLock=true&isMarket=false&limit=60&maxPrice={max_price}&minPrice={min_price}"
-        "&withStack=true"
+        "https://cs.money/csgo/trade?minPrice={min_price}&maxPrice={max_price}"
+        "&hasTradeLock=false"
     )
 
     result = []
